@@ -14,84 +14,118 @@ namespace _1
     {
         private bool isRefreshing = false;
         private string selectedPath = null;
-        private ImageList imageList1;
+        private int totalProcesses = 0;
+        private ulong totalMemory = 0;
+        private ListViewColumnSorter listViewColumnSorter;
 
         public konumbulma()
         {
             InitializeComponent();
-            InitializeStatusStrip();
+            InitializeListView();
             InitializeTimer();
-            InitializeImageList();
             konumum();
         }
 
-        private void InitializeStatusStrip()
+        private void InitializeListView()
         {
-            StatusStrip statusStrip1 = new StatusStrip();
-            statusStrip1.Items.Add(new ToolStripStatusLabel() { Name = "lblTotal", Text = "Toplam: 0" });
-            statusStrip1.Items.Add(new ToolStripStatusLabel() { Name = "lblLastUpdate", Text = "Son Güncelleme: " });
-            this.Controls.Add(statusStrip1);
+            listViewColumnSorter = new ListViewColumnSorter();
+            listView1.ListViewItemSorter = listViewColumnSorter;
+            listView1.ColumnClick += ListView1_ColumnClick;
         }
 
         private void InitializeTimer()
         {
-            Timer timerAutoRefresh = new Timer();
-            timerAutoRefresh.Interval = 5000; // 5 saniye
-            timerAutoRefresh.Tick += timer1_Tick;
-            timerAutoRefresh.Start();
+            timer1.Interval = 5000;
+            tsbRefreshInterval.SelectedIndex = 1; // Varsayılan 5 saniye
         }
 
-        private void InitializeImageList()
+        private void ListView1_ColumnClick(object sender, ColumnClickEventArgs e)
         {
-            imageList1 = new ImageList
+            if (e.Column == listViewColumnSorter.SortColumn)
             {
-                ImageSize = new Size(32, 32),
-                ColorDepth = ColorDepth.Depth32Bit
-            };
-            listView1.SmallImageList = imageList1;
-        }
-
-        private void konumum()
-        {
-            listView1.Items.Clear();
-            var query = "SELECT ProcessId, Name, ExecutablePath, WorkingSetSize FROM Win32_Process";
-
-            using (var searcher = new ManagementObjectSearcher(query))
-            using (var results = searcher.Get())
-            {
-                foreach (ManagementObject obj in results)
-                {
-                    try
-                    {
-                        uint pid = (uint)obj["ProcessId"];
-                        string name = (string)obj["Name"];
-                        string path = (string)obj["ExecutablePath"];
-                        ulong memory = (ulong)obj["WorkingSetSize"];
-
-                        if (path != null && System.IO.File.Exists(path))
-                        {
-                            var process = new ProcessInfo(pid, name, path, memory);
-
-                            var item = new ListViewItem(new[]
-                            {
-                             name,
-                             path,
-                             FormatMemoryUsage(memory)
-                         });
-
-                            this.ımageList1.Images.Add(pid.ToString(), process.Icon?.ToBitmap() ?? new Bitmap(1, 1));
-                            item.ImageKey = pid.ToString();
-                            this.listView1.Items.Add(item);
-                        }
-                    }
-                    catch { }
-                }
+                listViewColumnSorter.Order = listViewColumnSorter.Order == SortOrder.Ascending ?
+                    SortOrder.Descending : SortOrder.Ascending;
             }
+            else
+            {
+                listViewColumnSorter.SortColumn = e.Column;
+                listViewColumnSorter.Order = SortOrder.Ascending;
+            }
+
+            listView1.Sort();
+        }
+
+        private async void konumum()
+        {
+            if (isRefreshing) return;
+            isRefreshing = true;
+
+            lblStatus.Text = "Süreçler yükleniyor...";
+            listView1.BeginUpdate();
+            listView1.Items.Clear();
+            ımageList1.Images.Clear();
+            totalProcesses = 0;
+            totalMemory = 0;
+
+            try
+            {
+                var processes = await GetProcessesAsync();
+
+                foreach (var process in processes)
+                {
+                    if (process.ExecutablePath != null && File.Exists(process.ExecutablePath))
+                    {
+                        // Arama filtresi uygula
+                        if (!string.IsNullOrEmpty(txtSearch.Text) &&
+                            !process.Name.ToLower().Contains(txtSearch.Text.ToLower()))
+                            continue;
+
+                        var item = new ListViewItem(new[]
+                        {
+                            process.Name,
+                            process.ExecutablePath,
+                            FormatMemoryUsage(process.MemoryUsage),
+                            process.ProcessId.ToString()
+                        });
+
+                        string key = process.ProcessId.ToString();
+                        if (process.Icon != null)
+                        {
+                            ımageList1.Images.Add(key, process.Icon);
+                            item.ImageKey = key;
+                        }
+
+                        listView1.Items.Add(item);
+                        totalProcesses++;
+                        totalMemory += process.MemoryUsage;
+                    }
+                }
+
+                UpdateStatusBar();
+                lblStatus.Text = "Hazır";
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = "Hata oluştu";
+                MessageBox.Show($"Süreçler yüklenirken hata oluştu: {ex.Message}",
+                    "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                listView1.EndUpdate();
+                isRefreshing = false;
+            }
+        }
+
+        private void UpdateStatusBar()
+        {
+            lblProcessCount.Text = $"Süreçler: {totalProcesses}";
+            lblMemory.Text = $"Bellek: {FormatMemoryUsage(totalMemory)}";
         }
 
         private async Task<ProcessInfo[]> GetProcessesAsync()
         {
-            return await Task.Run(static () =>
+            return await Task.Run(() =>
             {
                 var query = "SELECT ProcessId, Name, ExecutablePath, WorkingSetSize FROM Win32_Process";
                 using (var searcher = new ManagementObjectSearcher(query))
@@ -109,23 +143,36 @@ namespace _1
 
         private string FormatMemoryUsage(ulong memory)
         {
-            if (memory >= 1024 * 1024 * 1024)
-                return (memory / (1024 * 1024 * 1024)).ToString("F2") + " GB";
-            else if (memory >= 1024 * 1024)
-                return (memory / (1024 * 1024)).ToString("F2") + " MB";
-            else
-                return (memory / 1024).ToString() + " KB";
+            string[] sizes = { "B", "KB", "MB", "GB" };
+            double len = memory;
+            int order = 0;
+            while (len >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                len = len / 1024;
+            }
+            return $"{len:0.##} {sizes[order]}";
         }
 
         private void bull_Click(object sender, EventArgs e)
         {
             if (!string.IsNullOrEmpty(selectedPath))
             {
-                System.Diagnostics.Process.Start("explorer.exe", System.IO.Path.GetDirectoryName(selectedPath));
+                try
+                {
+                    // Explorer'da dosyayı seçili olarak aç
+                    Process.Start("explorer.exe", $"/select,\"{selectedPath}\"");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Konum açılırken hata oluştu: {ex.Message}",
+                        "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
             else
             {
-                MessageBox.Show("Lütfen bir program seçin.", "Uyarı", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Lütfen bir program seçin.", "Uyarı",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -134,6 +181,11 @@ namespace _1
             if (listView1.SelectedItems.Count > 0)
             {
                 selectedPath = listView1.SelectedItems[0].SubItems[1].Text;
+                lblStatus.Text = $"{listView1.SelectedItems[0].Text} seçildi";
+            }
+            else
+            {
+                selectedPath = null;
             }
         }
 
@@ -144,7 +196,92 @@ namespace _1
 
         private void timer1_Tick(object sender, EventArgs e)
         {
+            if (tsbRefreshInterval.SelectedIndex > 0) // Otomatik yenileme açıksa
+            {
+                konumum();
+            }
+        }
+
+        private void konumbulma_Load(object sender, EventArgs e)
+        {
+            // ListView görünüm ayarları
+            listView1.View = View.Details;
+            listView1.FullRowSelect = true;
+            listView1.GridLines = true;
+        }
+
+        private void çıkışToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            this.Close();
+        }
+
+        private void tsbRefreshInterval_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            switch (tsbRefreshInterval.SelectedIndex)
+            {
+                case 0: timer1.Stop(); break; // Kapalı
+                case 1: timer1.Interval = 5000; timer1.Start(); break; // 5 saniye
+                case 2: timer1.Interval = 10000; timer1.Start(); break; // 10 saniye
+                case 3: timer1.Interval = 30000; timer1.Start(); break; // 30 saniye
+                case 4: timer1.Interval = 60000; timer1.Start(); break; // 1 dakika
+            }
+        }
+
+        private void bilgiToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count > 0)
+            {
+                var selectedItem = listView1.SelectedItems[0];
+                string message = $"Program: {selectedItem.Text}\n" +
+                               $"Yol: {selectedItem.SubItems[1].Text}\n" +
+                               $"Bellek: {selectedItem.SubItems[2].Text}\n" +
+                               $"PID: {selectedItem.SubItems[3].Text}";
+
+                MessageBox.Show(message, "Süreç Bilgileri",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void listView1_DoubleClick(object sender, EventArgs e)
+        {
+            bilgiToolStripMenuItem_Click(sender, e);
+        }
+
+        private void txtSearch_TextChanged(object sender, EventArgs e)
+        {
+            // Arama kutusuna yazıldığında filtreleme yapmak için 
             konumum();
+        }
+    }
+
+    // ListView sıralama
+    public class ListViewColumnSorter : IComparer
+    {
+        public int SortColumn { get; set; } = 0;
+        public SortOrder Order { get; set; } = SortOrder.Ascending;
+
+        public int Compare(object x, object y)
+        {
+            ListViewItem itemX = (ListViewItem)x;
+            ListViewItem itemY = (ListViewItem)y;
+
+            string textX = itemX.SubItems[SortColumn].Text;
+            string textY = itemY.SubItems[SortColumn].Text;
+
+            // Sayısal sıralama için kontrol (PID ve Bellek sütunları)
+            if (SortColumn == 2 || SortColumn == 3) // Bellek veya PID sütunu
+            {
+                if (double.TryParse(textX.Replace(" MB", "").Replace(" GB", "").Replace(" KB", ""), out double numX) &&
+                    double.TryParse(textY.Replace(" MB", "").Replace(" GB", "").Replace(" KB", ""), out double numY))
+                {
+                    return Order == SortOrder.Ascending ?
+                        numX.CompareTo(numY) : numY.CompareTo(numX);
+                }
+            }
+
+            // Metin sıralamak için
+            return Order == SortOrder.Ascending ?
+                string.Compare(textX, textY) : string.Compare(textY, textX);
         }
     }
 
@@ -163,41 +300,21 @@ namespace _1
             ExecutablePath = path;
             MemoryUsage = memory;
 
-            // İkonu yükle
             try
             {
-                if (!string.IsNullOrEmpty(path))
+                if (!string.IsNullOrEmpty(path) && File.Exists(path))
                 {
                     Icon = Icon.ExtractAssociatedIcon(path);
                 }
                 else
                 {
-                    Icon = null; // Yürütülebilir dosya yolu yoksa ikon yok
+                    Icon = SystemIcons.Application; // Varsayılan ikon
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Debug.WriteLine($"İkon yükleme hatası: {ex.Message}");
-                Icon = null; // Hata durumunda ikon yok
+                Icon = SystemIcons.Application; // Hata durumunda varsayılan ikon
             }
-        }
-    }
-
-    public class ListViewComparer : IComparer
-    {
-        private readonly int _col;
-        private readonly SortOrder _order;
-
-        public ListViewComparer(int column, SortOrder order)
-        {
-            _col = column;
-            _order = order;
-        }
-
-        public int Compare(object x, object y)
-        {
-            // Comparison logic here
-            return 0; // Placeholder
         }
     }
 }
